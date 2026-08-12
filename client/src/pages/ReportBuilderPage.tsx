@@ -469,22 +469,34 @@ function PreviewTable({ view }: { view: ReportView }) {
           The PDF renders up to 50,000 detail rows; group summaries are always exact.
         </CardDescription>
       </CardHeader>
-      <CardContent className="overflow-x-auto">
-        <table className="text-xs border-collapse w-full">
-          <thead>
-            <tr>
-              {view.columns.map((c) => (
-                <th
-                  key={c.name}
-                  className={`border px-2 py-1 bg-primary text-primary-foreground ${
-                    c.type === 'number' ? 'text-right' : 'text-left'
-                  }`}
-                >
-                  {c.label}
-                </th>
-              ))}
-            </tr>
-          </thead>
+      <CardContent className="space-y-3">
+        {view.groupingTooLarge && (
+          <Alert>
+            <AlertDescription>
+              Grouping by{' '}
+              <span className="font-medium">{view.requestedGroupBy.join(', ')}</span> produces too
+              many distinct groups to band ({'>'}10,000), so this preview is shown ungrouped with a
+              single grand total. Pick a lower-cardinality column to group by (e.g. a status or
+              category) to get per-group subtotals.
+            </AlertDescription>
+          </Alert>
+        )}
+        <div className="max-h-[32rem] overflow-auto rounded-md border">
+          <table className="text-xs border-collapse w-full">
+            <thead className="sticky top-0 z-10">
+              <tr>
+                {view.columns.map((c) => (
+                  <th
+                    key={c.name}
+                    className={`border px-2 py-1 bg-primary text-primary-foreground ${
+                      c.type === 'number' ? 'text-right' : 'text-left'
+                    }`}
+                  >
+                    {c.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
           <tbody>
             {view.lines.map((line, i) => {
               if (line.type === 'group-header') {
@@ -544,7 +556,8 @@ function PreviewTable({ view }: { view: ReportView }) {
               );
             })}
           </tbody>
-        </table>
+          </table>
+        </div>
       </CardContent>
     </Card>
   );

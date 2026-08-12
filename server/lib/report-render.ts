@@ -44,16 +44,32 @@ export async function liveColumns(
   });
 }
 
+/**
+ * Cap on how many group rows the ROLLUP aggregate may return. The warehouse
+ * returns results INLINE (~25 MB); a high-cardinality grouping (e.g. grouping
+ * by a near-unique key like an order id) would return millions of rows and
+ * overflow that limit, failing the whole query. We cap the ROLLUP here and, if
+ * the cap is hit, degrade to an ungrouped (flat) view — the report still
+ * renders, just without per-group banding.
+ */
+const AGG_GROUP_CAP = 10000;
+
 export interface ReportData {
   detailRows: Record<string, unknown>[];
   aggRows: Record<string, unknown>[];
   detailTruncated: boolean;
+  /** The grouping actually applied (empty when we fell back to flat). */
+  effectiveGroupBy: string[];
+  /** True when the requested grouping exceeded AGG_GROUP_CAP and was dropped. */
+  groupingTooLarge: boolean;
 }
 
 /**
- * Run the two report queries: a BOUNDED detail SELECT and a full-table ROLLUP
+ * Run the two report queries: a BOUNDED detail SELECT and a capped ROLLUP
  * aggregate. The aggregate is computed in the warehouse, so subtotals scale to
- * very large tables regardless of the detail cap.
+ * very large tables regardless of the detail cap. If the grouping is too
+ * high-cardinality (more than AGG_GROUP_CAP distinct groups), we re-fetch a
+ * grand-total-only aggregate and render the report flat.
  */
 export async function fetchReportData(
   appkit: AppKit,
@@ -65,9 +81,16 @@ export async function fetchReportData(
   if (!report.source_table) throw new Error('Report has no source table');
   if (report.columns.length === 0) throw new Error('Report has no columns selected');
   const allowed = live.map((c) => c.name);
+  const source = report.source_table;
+
+  const aggColumns: AggColumn[] = report.columns.map((c, index) => ({
+    index,
+    name: c.name,
+    agg: c.agg,
+  }));
 
   const detailSql = buildReportQuery(
-    report.source_table,
+    source,
     report.columns.map((c) => c.name),
     report.group_by,
     allowed,
@@ -75,17 +98,15 @@ export async function fetchReportData(
     filter,
   );
 
-  const aggColumns: AggColumn[] = report.columns.map((c, index) => ({
-    index,
-    name: c.name,
-    agg: c.agg,
-  }));
+  // Fetch one more than the cap so we can tell whether it was exceeded. ROLLUP
+  // adds a grand-total row on top of the per-group rows, hence the +2.
   const aggSql = buildAggregateQuery(
-    report.source_table,
+    source,
     aggColumns,
     report.group_by,
     allowed,
     filter,
+    report.group_by.length > 0 ? AGG_GROUP_CAP + 2 : undefined,
   );
 
   const [detailResult, aggResult] = await Promise.all([
@@ -97,7 +118,22 @@ export async function fetchReportData(
   const detailTruncated = allDetail.length > detailLimit;
   const detailRows = detailTruncated ? allDetail.slice(0, detailLimit) : allDetail;
 
-  return { detailRows, aggRows: aggResult.data ?? [], detailTruncated };
+  let aggRows = aggResult.data ?? [];
+  let effectiveGroupBy = report.group_by;
+  let groupingTooLarge = false;
+
+  // Too many groups → the per-group banding isn't meaningful (and would have
+  // overflowed without the cap). Re-fetch a grand-total-only aggregate and
+  // render the report flat.
+  if (report.group_by.length > 0 && aggRows.length > AGG_GROUP_CAP + 1) {
+    const flatAggSql = buildAggregateQuery(source, aggColumns, [], allowed, filter);
+    const flatAgg = await appkit.analytics.query(flatAggSql);
+    aggRows = flatAgg.data ?? [];
+    effectiveGroupBy = [];
+    groupingTooLarge = true;
+  }
+
+  return { detailRows, aggRows, detailTruncated, effectiveGroupBy, groupingTooLarge };
 }
 
 /** Build the banded view for a report (used by the preview endpoint). */
@@ -109,14 +145,12 @@ export async function buildView(
   filter?: ReportFilter,
 ): Promise<ReportView> {
   const live = await liveColumns(ws, report.source_table ?? '');
-  const { detailRows, aggRows, detailTruncated } = await fetchReportData(
-    appkit,
-    report,
-    live,
-    detailLimit,
-    filter,
-  );
-  return buildReportView(detailRows, aggRows, report.columns, report.group_by, detailTruncated);
+  const { detailRows, aggRows, detailTruncated, effectiveGroupBy, groupingTooLarge } =
+    await fetchReportData(appkit, report, live, detailLimit, filter);
+  return buildReportView(detailRows, aggRows, report.columns, effectiveGroupBy, detailTruncated, {
+    groupingTooLarge,
+    requestedGroupBy: report.group_by,
+  });
 }
 
 /**

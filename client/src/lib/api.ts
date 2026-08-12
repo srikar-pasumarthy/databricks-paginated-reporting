@@ -103,6 +103,10 @@ export interface ReportView {
   detailShown: number;
   /** True if the detail cap was hit (subtotals are still exact). */
   detailTruncated: boolean;
+  /** True when the requested grouping was too high-cardinality and dropped. */
+  groupingTooLarge: boolean;
+  /** The grouping the user asked for (present even when dropped). */
+  requestedGroupBy: string[];
   sql_limit: number;
 }
 

@@ -41,6 +41,10 @@ export interface ReportView {
   detailShown: number;
   /** True if the detail row cap was hit (some groups may show partial detail). */
   detailTruncated: boolean;
+  /** True when the requested grouping was too high-cardinality and dropped. */
+  groupingTooLarge: boolean;
+  /** The grouping the user asked for (present even when dropped). */
+  requestedGroupBy: string[];
 }
 
 /** Guardrail: refuse to build more than this many group rows (high-cardinality grouping). */
@@ -157,7 +161,9 @@ function renderCells(cells: (number | null)[]): (string | null)[] {
  *
  * @param detailRows bounded detail rows, ORDER BY the group columns
  * @param aggRows    ROLLUP result over the whole table
+ * @param groupBy    the grouping actually applied (may be [] after fallback)
  * @param detailTruncated whether the detail cap was hit
+ * @param opts       high-cardinality fallback metadata
  */
 export function buildReportView(
   detailRows: Row[],
@@ -165,6 +171,7 @@ export function buildReportView(
   columns: ReportColumn[],
   groupBy: string[],
   detailTruncated = false,
+  opts: { groupingTooLarge?: boolean; requestedGroupBy?: string[] } = {},
 ): ReportView {
   const entries = parseAggRows(aggRows, columns, groupBy);
 
@@ -258,5 +265,7 @@ export function buildReportView(
     rowCount,
     detailShown: detailRows.length,
     detailTruncated,
+    groupingTooLarge: opts.groupingTooLarge ?? false,
+    requestedGroupBy: opts.requestedGroupBy ?? groupBy,
   };
 }

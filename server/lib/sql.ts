@@ -142,6 +142,7 @@ export function buildAggregateQuery(
   groupBy: string[],
   allowed: string[],
   filter?: ReportFilter,
+  limit?: number,
 ): string {
   assertAllowed(
     columns.map((c) => c.name),
@@ -164,6 +165,13 @@ export function buildAggregateQuery(
   sql += whereClause(filter, allowed);
   if (groupBy.length > 0) {
     sql += ` GROUP BY ROLLUP(${groupBy.map(quoteIdent).join(', ')})`;
+  }
+  // Cap the number of returned group rows. A high-cardinality grouping (e.g.
+  // grouping by a near-unique key) would otherwise return millions of rows and
+  // overflow the warehouse INLINE result limit. The caller fetches limit+1 to
+  // detect that it was hit and degrade gracefully.
+  if (limit !== undefined && limit > 0) {
+    sql += ` LIMIT ${Math.floor(limit)}`;
   }
   return sql;
 }
