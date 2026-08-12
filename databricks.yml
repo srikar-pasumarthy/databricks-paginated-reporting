@@ -1,0 +1,59 @@
+bundle:
+  name: geisinger-paginated-reports
+
+variables:
+  sql_warehouse_id:
+    description: SQL Warehouse ID
+  postgres_branch:
+    description: Full Lakebase Postgres branch resource name (projects/{id}/branches/{id}).
+  postgres_database:
+    description: Full Lakebase Postgres database resource name.
+
+resources:
+  apps:
+    app:
+      name: "geisinger-paginated-reports"
+      description: "Grouped paginated reporting on Databricks AppKit"
+      source_code_path: ./
+
+      # Start the app automatically on deploy.
+      lifecycle:
+        started: true
+      # Scopes carried on the forwarded user token. Catalog scopes let the
+      # discovery routes browse Unity Catalog on-behalf-of the user; sql is used
+      # by the analytics query path.
+      user_api_scopes:
+        - sql
+        - catalog.catalogs:read
+        - catalog.schemas:read
+        - catalog.tables:read
+
+      # The resources which this app has access to.
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.sql_warehouse_id}
+            permission: CAN_USE
+        - name: postgres
+          postgres:
+            branch: ${var.postgres_branch}
+            database: ${var.postgres_database}
+            permission: CAN_CONNECT_AND_CREATE
+        # Shared secret gating the scheduler tick endpoint. The Databricks Job
+        # that pokes /api/scheduler/tick passes this value; the app compares it.
+        - name: scheduler-token
+          secret:
+            scope: geisinger_paginated_reports
+            key: scheduler_token
+            permission: READ
+
+targets:
+  default:
+    default: true
+    workspace:
+      host: https://fevm-srikar-demo-workspace.cloud.databricks.com
+
+    variables:
+      sql_warehouse_id: 0496cb1d628a2232
+      postgres_branch: projects/paginated-appkit/branches/production
+      postgres_database: projects/paginated-appkit/branches/production/databases/databricks-postgres
