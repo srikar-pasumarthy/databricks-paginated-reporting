@@ -29,6 +29,45 @@ function assertAllowed(columns: string[], allowed: string[]): void {
 }
 
 /**
+ * A single equality filter used for "report bursting" — rendering the report
+ * for one group value (e.g. hospital = 'Kaiser'). The value is a raw cell value
+ * (usually a string discovered from the data); we turn it into a safe SQL
+ * literal, never string-concatenating user text into the query unescaped.
+ */
+export interface ReportFilter {
+  column: string;
+  /** null means the group value is SQL NULL (rendered as `IS NULL`). */
+  value: string | number | boolean | null;
+  type: 'string' | 'number' | 'boolean' | 'date';
+}
+
+/** Render a value as a safe SQL literal for the given scalar type. */
+export function sqlLiteral(value: ReportFilter['value'], type: ReportFilter['type']): string {
+  if (value === null) return 'NULL';
+  if (type === 'number') {
+    const n = Number(value);
+    if (!Number.isFinite(n)) throw new Error(`Invalid numeric filter value: ${String(value)}`);
+    return String(n);
+  }
+  if (type === 'boolean') {
+    return value === true || value === 'true' ? 'TRUE' : 'FALSE';
+  }
+  // string / date → single-quoted, with single quotes and backslashes escaped.
+  // Spark SQL treats backslash as an escape char in string literals by default.
+  const s = String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  return `'${s}'`;
+}
+
+/** Build a `WHERE` clause for an optional burst filter (empty string if none). */
+function whereClause(filter: ReportFilter | undefined, allowed: string[]): string {
+  if (!filter) return '';
+  assertAllowed([filter.column], allowed);
+  const col = quoteIdent(filter.column);
+  if (filter.value === null) return ` WHERE ${col} IS NULL`;
+  return ` WHERE ${col} = ${sqlLiteral(filter.value, filter.type)}`;
+}
+
+/**
  * Build the report's detail query: the selected columns from the source table,
  * ordered by the group-by columns (so the server can detect group breaks by
  * scanning rows in order). All identifiers must be a subset of `allowed`.
@@ -39,6 +78,7 @@ export function buildReportQuery(
   groupBy: string[],
   allowed: string[],
   limit: number,
+  filter?: ReportFilter,
 ): string {
   if (columns.length === 0) {
     throw new Error('At least one column is required');
@@ -48,6 +88,7 @@ export function buildReportQuery(
 
   const cols = columns.map(quoteIdent).join(', ');
   let sql = `SELECT ${cols} FROM ${quoteFullName(fullName)}`;
+  sql += whereClause(filter, allowed);
   if (groupBy.length > 0) {
     sql += ` ORDER BY ${groupBy.map(quoteIdent).join(', ')}`;
   }
@@ -100,6 +141,7 @@ export function buildAggregateQuery(
   columns: AggColumn[],
   groupBy: string[],
   allowed: string[],
+  filter?: ReportFilter,
 ): string {
   assertAllowed(
     columns.map((c) => c.name),
@@ -119,6 +161,7 @@ export function buildAggregateQuery(
   }
 
   let sql = `SELECT ${selects.join(', ')} FROM ${quoteFullName(fullName)}`;
+  sql += whereClause(filter, allowed);
   if (groupBy.length > 0) {
     sql += ` GROUP BY ROLLUP(${groupBy.map(quoteIdent).join(', ')})`;
   }

@@ -18,14 +18,23 @@ import {
   SelectTrigger,
   SelectValue,
   Switch,
+  RadioGroup,
+  RadioGroupItem,
 } from '@databricks/appkit-ui/react';
-import { Mail, Plus, Trash2, Send, Clock } from 'lucide-react';
-import { api, type Schedule, type SchedulesResponse, type Frequency } from '../lib/api';
+import { Mail, Plus, Trash2, Send, Clock, Users, Split } from 'lucide-react';
+import {
+  api,
+  type Schedule,
+  type SchedulesResponse,
+  type Frequency,
+  type DeliveryMode,
+  type ReportColumn,
+  type GroupValuesResponse,
+} from '../lib/api';
 import { run } from '../lib/utils';
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-/** A small set of common timezones + the viewer's local zone. */
 function timezoneOptions(): string[] {
   const local = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const common = [
@@ -39,8 +48,17 @@ function timezoneOptions(): string[] {
   return [local, ...common.filter((t) => t !== local)];
 }
 
-interface DraftState {
+/** One row of the split recipient map in the form. */
+interface SplitRow {
+  value: string | null;
   recipients: string;
+}
+
+interface DraftState {
+  mode: DeliveryMode;
+  recipients: string;
+  splitColumn: string;
+  splitRows: SplitRow[];
   subject: string;
   frequency: Frequency;
   weekday: number;
@@ -51,9 +69,12 @@ interface DraftState {
   timezone: string;
 }
 
-function emptyDraft(): DraftState {
+function emptyDraft(defaultSplitColumn: string): DraftState {
   return {
+    mode: 'single',
     recipients: '',
+    splitColumn: defaultSplitColumn,
+    splitRows: [],
     subject: '',
     frequency: 'weekly',
     weekday: 1,
@@ -70,13 +91,26 @@ function fmt(ts: string | null): string {
   return new Date(ts).toLocaleString();
 }
 
-export function SchedulePanel({ reportId, canSend }: { reportId: string; canSend: boolean }) {
+export function SchedulePanel({
+  reportId,
+  canSend,
+  groupBy,
+  columns,
+}: {
+  reportId: string;
+  canSend: boolean;
+  groupBy: string[];
+  columns: ReportColumn[];
+}) {
   const [data, setData] = useState<SchedulesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
-  const [draft, setDraft] = useState<DraftState>(emptyDraft());
+  const [loadingGroups, setLoadingGroups] = useState(false);
+  const [draft, setDraft] = useState<DraftState>(emptyDraft(groupBy[0] ?? ''));
+
+  const labelFor = (name: string) => columns.find((c) => c.name === name)?.label ?? name;
 
   const load = useCallback(async () => {
     try {
@@ -90,28 +124,70 @@ export function SchedulePanel({ reportId, canSend }: { reportId: string; canSend
     void load();
   }, [load]);
 
-  const specFromDraft = (d: DraftState) => ({
-    recipients: d.recipients
-      .split(/[,;\s]+/)
-      .map((s) => s.trim())
-      .filter(Boolean),
-    subject: d.subject,
-    frequency: d.frequency,
-    weekday: d.weekday,
-    dayOfMonth: d.dayOfMonth,
-    hour: d.hour,
-    minute: d.minute,
-    cron: d.cron,
-    timezone: d.timezone,
-  });
+  /** Load distinct values of the chosen split column into blank mapping rows. */
+  const loadGroups = async () => {
+    if (!draft.splitColumn) return;
+    setLoadingGroups(true);
+    setError(null);
+    try {
+      const res = await api.get<GroupValuesResponse>(
+        `/api/reports/${reportId}/group-values?column=${encodeURIComponent(draft.splitColumn)}`,
+      );
+      setDraft((d) => ({
+        ...d,
+        splitRows: res.values.map((v) => ({ value: v.value, recipients: '' })),
+      }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingGroups(false);
+    }
+  };
+
+  /** Build the API payload from the draft (single or split). */
+  const payloadFromDraft = (d: DraftState) => {
+    const base = {
+      subject: d.subject,
+      frequency: d.frequency,
+      weekday: d.weekday,
+      dayOfMonth: d.dayOfMonth,
+      hour: d.hour,
+      minute: d.minute,
+      cron: d.cron,
+      timezone: d.timezone,
+      mode: d.mode,
+    };
+    if (d.mode === 'split') {
+      return {
+        ...base,
+        split_column: d.splitColumn,
+        recipient_map: d.splitRows
+          .map((r) => ({
+            value: r.value,
+            recipients: r.recipients
+              .split(/[,;\s]+/)
+              .map((s) => s.trim())
+              .filter(Boolean),
+          }))
+          .filter((r) => r.recipients.length > 0),
+      };
+    }
+    return {
+      ...base,
+      recipients: d.recipients
+        .split(/[,;\s]+/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+    };
+  };
 
   const createSchedule = async () => {
     setBusy(true);
     setError(null);
     try {
-      await api.post(`/api/reports/${reportId}/schedules`, specFromDraft(draft));
+      await api.post(`/api/reports/${reportId}/schedules`, payloadFromDraft(draft));
       setShowForm(false);
-      setDraft(emptyDraft());
+      setDraft(emptyDraft(groupBy[0] ?? ''));
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -146,14 +222,22 @@ export function SchedulePanel({ reportId, canSend }: { reportId: string; canSend
     setError(null);
     setNotice(null);
     try {
-      const res = await api.post<{ status: string; row_count: number }>(
-        `/api/reports/${reportId}/send-now`,
-        { recipients: s.recipients, subject: s.subject, body: s.body },
-      );
+      const payload =
+        s.mode === 'split'
+          ? { mode: 'split', split_column: s.split_column, recipient_map: s.recipient_map, subject: s.subject, body: s.body }
+          : { mode: 'single', recipients: s.recipients, subject: s.subject, body: s.body };
+      const res = await api.post<{
+        mode: DeliveryMode;
+        slices: { group_value: string | null; status: string; row_count: number }[];
+      }>(`/api/reports/${reportId}/send-now`, payload);
+      const previews = res.slices.filter((x) => x.status === 'preview').length;
+      const sent = res.slices.filter((x) => x.status === 'sent').length;
+      const failed = res.slices.filter((x) => x.status === 'failed').length;
+      const verb = previews > 0 && sent === 0 ? 'Previewed' : 'Sent';
       setNotice(
-        res.status === 'preview'
-          ? `Preview only (no SMTP configured): rendered ${res.row_count.toLocaleString()} rows and logged the send to ${s.recipients.join(', ')}.`
-          : `Sent to ${s.recipients.join(', ')}.`,
+        `${verb} ${res.slices.length} ${res.mode === 'split' ? 'group email(s)' : 'email'}` +
+          (failed ? ` — ${failed} failed` : '') +
+          (previews > 0 && sent === 0 ? ' (no SMTP configured; render + log only).' : '.'),
       );
       await load();
     } catch (e) {
@@ -163,6 +247,8 @@ export function SchedulePanel({ reportId, canSend }: { reportId: string; canSend
     }
   };
 
+  const mappedCount = draft.splitRows.filter((r) => r.recipients.trim()).length;
+
   return (
     <Card>
       <CardHeader>
@@ -170,7 +256,8 @@ export function SchedulePanel({ reportId, canSend }: { reportId: string; canSend
           <Mail className="h-4 w-4" /> Email schedule
         </CardTitle>
         <CardDescription>
-          Email this report as a PDF to recipients on a recurring schedule.
+          Email this report as a PDF on a recurring schedule — either the whole report to one list, or
+          split by a group so each group&apos;s data goes to its own recipients.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -210,9 +297,23 @@ export function SchedulePanel({ reportId, canSend }: { reportId: string; canSend
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>
-                <div className="text-xs text-muted-foreground pl-6">
-                  To: {s.recipients.join(', ')}
-                  {!s.enabled && <Badge variant="outline" className="ml-2">paused</Badge>}
+                <div className="text-xs text-muted-foreground pl-6 flex items-center gap-2 flex-wrap">
+                  {s.mode === 'split' ? (
+                    <>
+                      <Badge variant="secondary" className="gap-1">
+                        <Split className="h-3 w-3" /> Split by {labelFor(s.split_column ?? '')}
+                      </Badge>
+                      <span>{s.recipient_map.length} group(s) → their own recipients</span>
+                    </>
+                  ) : (
+                    <>
+                      <Badge variant="outline" className="gap-1">
+                        <Users className="h-3 w-3" /> Full report
+                      </Badge>
+                      <span>To: {s.recipients.join(', ')}</span>
+                    </>
+                  )}
+                  {!s.enabled && <Badge variant="outline">paused</Badge>}
                 </div>
                 <div className="text-xs text-muted-foreground pl-6">
                   Next run: {s.enabled ? fmt(s.next_run_at) : '—'} · Last run: {fmt(s.last_run_at)}
@@ -226,15 +327,108 @@ export function SchedulePanel({ reportId, canSend }: { reportId: string; canSend
 
         {/* Add form */}
         {showForm ? (
-          <div className="rounded-md border p-4 space-y-3">
+          <div className="rounded-md border p-4 space-y-4">
+            {/* Delivery mode */}
             <div className="space-y-1.5">
-              <Label className="text-sm">Recipients</Label>
-              <Input
-                placeholder="alice@example.com, bob@example.com"
-                value={draft.recipients}
-                onChange={(e) => setDraft({ ...draft, recipients: e.target.value })}
-              />
+              <Label className="text-sm">Delivery</Label>
+              <RadioGroup
+                value={draft.mode}
+                onValueChange={(v) => setDraft({ ...draft, mode: v as DeliveryMode })}
+                className="flex flex-col gap-1.5"
+              >
+                <label className="flex items-start gap-2 text-sm cursor-pointer">
+                  <RadioGroupItem value="single" className="mt-0.5" />
+                  <span>
+                    <span className="font-medium">Full report to one list</span>
+                    <span className="text-muted-foreground"> — everyone gets the whole report.</span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2 text-sm cursor-pointer">
+                  <RadioGroupItem value="split" className="mt-0.5" disabled={groupBy.length === 0} />
+                  <span>
+                    <span className="font-medium">Split by group</span>
+                    <span className="text-muted-foreground">
+                      {groupBy.length === 0
+                        ? ' — add a group-by column to the report to enable this.'
+                        : ' — each group value gets a filtered report sent to its own recipients.'}
+                    </span>
+                  </span>
+                </label>
+              </RadioGroup>
             </div>
+
+            {/* Recipients (single) or split mapping */}
+            {draft.mode === 'single' ? (
+              <div className="space-y-1.5">
+                <Label className="text-sm">Recipients</Label>
+                <Input
+                  placeholder="alice@example.com, bob@example.com"
+                  value={draft.recipients}
+                  onChange={(e) => setDraft({ ...draft, recipients: e.target.value })}
+                />
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-end gap-2 flex-wrap">
+                  <div className="space-y-1.5">
+                    <Label className="text-sm">Split by</Label>
+                    <Select
+                      value={draft.splitColumn}
+                      onValueChange={(v) => setDraft({ ...draft, splitColumn: v, splitRows: [] })}
+                    >
+                      <SelectTrigger className="w-56">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {groupBy.map((g) => (
+                          <SelectItem key={g} value={g}>
+                            {labelFor(g)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button variant="outline" onClick={run(loadGroups)} disabled={loadingGroups || !draft.splitColumn}>
+                    {loadingGroups ? <Spinner className="h-4 w-4 mr-1" /> : null}
+                    Load groups
+                  </Button>
+                </div>
+
+                {draft.splitRows.length > 0 ? (
+                  <div className="space-y-1.5 max-h-80 overflow-auto pr-1">
+                    <div className="text-xs text-muted-foreground">
+                      Enter recipients for each group. Leave a group blank to skip it.
+                    </div>
+                    {draft.splitRows.map((row, i) => (
+                      <div key={row.value ?? `__null_${i}`} className="grid grid-cols-3 gap-2 items-center">
+                        <div className="text-sm font-mono truncate" title={row.value ?? '(blank)'}>
+                          {row.value ?? '(blank)'}
+                        </div>
+                        <Input
+                          className="col-span-2 h-8 text-sm"
+                          placeholder="team@example.com, lead@example.com"
+                          value={row.recipients}
+                          onChange={(e) => {
+                            const next = [...draft.splitRows];
+                            next[i] = { ...next[i], recipients: e.target.value };
+                            setDraft({ ...draft, splitRows: next });
+                          }}
+                        />
+                      </div>
+                    ))}
+                    <div className="text-xs text-muted-foreground">
+                      {mappedCount} of {draft.splitRows.length} groups will receive email.
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Click <em>Load groups</em> to list the values of {labelFor(draft.splitColumn)} and
+                    assign recipients.
+                  </p>
+                )}
+              </div>
+            )}
+
             <div className="space-y-1.5">
               <Label className="text-sm">Subject (optional)</Label>
               <Input
@@ -264,10 +458,7 @@ export function SchedulePanel({ reportId, canSend }: { reportId: string; canSend
               </div>
               <div className="space-y-1.5">
                 <Label className="text-sm">Timezone</Label>
-                <Select
-                  value={draft.timezone}
-                  onValueChange={(v) => setDraft({ ...draft, timezone: v })}
-                >
+                <Select value={draft.timezone} onValueChange={(v) => setDraft({ ...draft, timezone: v })}>
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -282,7 +473,6 @@ export function SchedulePanel({ reportId, canSend }: { reportId: string; canSend
               </div>
             </div>
 
-            {/* Cadence detail */}
             {draft.frequency === 'cron' ? (
               <div className="space-y-1.5">
                 <Label className="text-sm">Cron expression</Label>

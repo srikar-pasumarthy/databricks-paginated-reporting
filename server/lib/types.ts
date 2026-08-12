@@ -59,10 +59,21 @@ export interface StructureField {
 export type Frequency = 'daily' | 'weekly' | 'monthly' | 'cron';
 
 /** A saved email schedule for a report. */
+/** Delivery mode: one PDF to everyone, or one filtered PDF per group value. */
+export type DeliveryMode = 'single' | 'split';
+
+/** One routing entry for split (burst) delivery: a group value → its recipients. */
+export interface RecipientMapEntry {
+  /** The group value (as text); null routes the NULL/blank group. */
+  value: string | null;
+  recipients: string[];
+}
+
 export interface Schedule {
   id: string;
   report_id: string;
   created_by: string;
+  /** Recipients for 'single' mode. */
   recipients: string[];
   subject: string;
   body: string;
@@ -73,6 +84,12 @@ export interface Schedule {
   /** Human-readable summary, e.g. "Weekly on Monday at 08:00 (America/New_York)". */
   summary: string;
   enabled: boolean;
+  /** 'single' = whole report to `recipients`; 'split' = burst by `split_column`. */
+  mode: DeliveryMode;
+  /** For 'split': which group-by column drives the burst. */
+  split_column: string | null;
+  /** For 'split': per-group-value recipient routing. */
+  recipient_map: RecipientMapEntry[];
   next_run_at: string | null;
   last_run_at: string | null;
   created_at: string;
@@ -92,6 +109,8 @@ export interface SendLogEntry {
   trigger: SendTrigger;
   pdf_bytes: number | null;
   row_count: number | null;
+  /** For split sends: which group value this row was for. */
+  group_value: string | null;
   error: string | null;
   created_at: string;
 }

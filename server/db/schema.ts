@@ -42,12 +42,22 @@ const STATEMENTS = [
     enabled boolean NOT NULL DEFAULT true,
     next_run_at timestamptz,
     last_run_at timestamptz,
+    -- Delivery mode: single = one PDF of the whole report to recipients;
+    -- split = report bursting, one filtered PDF per value of split_column
+    -- routed to that value's recipients in recipient_map.
+    mode varchar(8) NOT NULL DEFAULT 'single' CHECK (mode IN ('single', 'split')),
+    split_column text,
+    recipient_map jsonb NOT NULL DEFAULT '[]',
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`,
   `CREATE INDEX IF NOT EXISTS idx_schedules_report ON greport.schedules(report_id)`,
   // The scheduler polls this: enabled schedules whose next_run_at is due.
   `CREATE INDEX IF NOT EXISTS idx_schedules_due ON greport.schedules(next_run_at) WHERE enabled`,
+  // Idempotent add-columns for schemas created before split delivery existed.
+  `ALTER TABLE greport.schedules ADD COLUMN IF NOT EXISTS mode varchar(8) NOT NULL DEFAULT 'single'`,
+  `ALTER TABLE greport.schedules ADD COLUMN IF NOT EXISTS split_column text`,
+  `ALTER TABLE greport.schedules ADD COLUMN IF NOT EXISTS recipient_map jsonb NOT NULL DEFAULT '[]'`,
 
   // Audit log of every send attempt (real or preview).
   `CREATE TABLE IF NOT EXISTS greport.send_log (
@@ -59,11 +69,14 @@ const STATEMENTS = [
     trigger varchar(12) NOT NULL DEFAULT 'schedule' CHECK (trigger IN ('schedule', 'manual')),
     pdf_bytes integer,
     row_count integer,
+    -- For split (burst) sends: which group value this row was for.
+    group_value text,
     error text,
     created_at timestamptz NOT NULL DEFAULT now()
   )`,
   `CREATE INDEX IF NOT EXISTS idx_send_log_schedule ON greport.send_log(schedule_id)`,
   `CREATE INDEX IF NOT EXISTS idx_send_log_report ON greport.send_log(report_id)`,
+  `ALTER TABLE greport.send_log ADD COLUMN IF NOT EXISTS group_value text`,
 ];
 
 export async function initSchema(appkit: AppKit): Promise<void> {

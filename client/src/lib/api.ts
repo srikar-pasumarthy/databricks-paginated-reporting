@@ -41,6 +41,12 @@ export interface StructureField {
 }
 
 export type Frequency = 'daily' | 'weekly' | 'monthly' | 'cron';
+export type DeliveryMode = 'single' | 'split';
+
+export interface RecipientMapEntry {
+  value: string | null;
+  recipients: string[];
+}
 
 export interface Schedule {
   id: string;
@@ -53,6 +59,9 @@ export interface Schedule {
   timezone: string;
   summary: string;
   enabled: boolean;
+  mode: DeliveryMode;
+  split_column: string | null;
+  recipient_map: RecipientMapEntry[];
   next_run_at: string | null;
   last_run_at: string | null;
   created_at: string;
@@ -62,6 +71,11 @@ export interface Schedule {
 export interface SchedulesResponse {
   mailerConfigured: boolean;
   schedules: Schedule[];
+}
+
+export interface GroupValuesResponse {
+  column: string;
+  values: { value: string | null; type: string }[];
 }
 
 export interface UcColumn {

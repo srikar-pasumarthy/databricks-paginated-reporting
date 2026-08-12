@@ -439,7 +439,14 @@ export function ReportBuilderPage() {
       {preview && <PreviewTable view={preview} />}
 
       {/* Email scheduling */}
-      {report.columns.length > 0 && <SchedulePanel reportId={report.id} canSend={canPreview} />}
+      {report.columns.length > 0 && (
+        <SchedulePanel
+          reportId={report.id}
+          canSend={canPreview}
+          groupBy={report.group_by}
+          columns={report.columns}
+        />
+      )}
     </div>
   );
 }
